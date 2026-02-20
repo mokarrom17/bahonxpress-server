@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 dotenv.config();
 const app = express();
@@ -91,6 +91,20 @@ async function run() {
           success: false,
           message: "Internal Server Error",
         });
+      }
+    });
+    // ✅ Delete parcel
+    app.delete("/parcels/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await parcelCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error deleting parcel: ", error);
+        res.status(500).send({ message: "Failed to delete parcel" });
       }
     });
 
