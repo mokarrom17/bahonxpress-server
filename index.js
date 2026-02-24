@@ -2,8 +2,10 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { default: Stripe } = require("stripe");
 
 dotenv.config();
+const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -30,6 +32,7 @@ async function run() {
 
     const db = client.db("parcelDB");
     const parcelCollection = db.collection("parcels");
+    const paymentCollection = db.collection("payments");
     // ✅ GET all parcels
     app.get("/parcels", async (req, res) => {
       const parcels = await parcelCollection.find().toArray();
@@ -57,28 +60,40 @@ async function run() {
         });
       }
     });
+    // Get: Get a specific parcel by ID
+    app.get("/parcels/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // Convert id to ObjectId
+        const query = { _id: new ObjectId(id) };
+
+        const parcel = await parcelCollection.findOne(query);
+
+        if (!parcel) {
+          return res.status(404).json({ message: "Parcel not found" });
+        }
+
+        res.send(parcel);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
 
     // ✅ POST new parcel
     app.post("/parcels", async (req, res) => {
       try {
         const parcelData = req.body;
 
-        // Basic validation
-        if (!parcelData.trackingId) {
-          return res.status(400).json({
-            success: false,
-            message: "Tracking ID is required",
-          });
-        }
+        const newParcel = {
+          ...parcelData,
+          status: "pending",
+          paymentStatus: "unpaid",
+          createdAt: new Date(),
+        };
 
-        if (!parcelData.userEmail) {
-          return res.status(400).json({
-            success: false,
-            message: "User email is required",
-          });
-        }
-
-        const result = await parcelCollection.insertOne(parcelData);
+        const result = await parcelCollection.insertOne(newParcel);
 
         res.status(201).json({
           success: true,
@@ -87,10 +102,9 @@ async function run() {
         });
       } catch (error) {
         console.error("Parcel Insert Error:", error);
-        res.status(500).json({
-          success: false,
-          message: "Internal Server Error",
-        });
+        res
+          .status(500)
+          .json({ success: false, message: "Internal Server Error" });
       }
     });
     // ✅ Delete parcel
@@ -105,6 +119,83 @@ async function run() {
       } catch (error) {
         console.error("Error deleting parcel: ", error);
         res.status(500).send({ message: "Failed to delete parcel" });
+      }
+    });
+
+    // Update parcel payment status
+    app.patch("/parcels/payment/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              paymentStatus: "paid",
+              paymentDate: new Date().toISOString(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Failed to update payment status" });
+      }
+    });
+
+    // Save payment history entry
+    app.post("/payments", async (req, res) => {
+      try {
+        const paymentInfo = req.body;
+        paymentInfo.createdAt = new Date().toISOString();
+
+        const result = await paymentCollection.insertOne(paymentInfo);
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Failed to save payment history" });
+      }
+    });
+    // GET API → Load Payment History (User-Specific)
+    app.get("/payments", async (req, res) => {
+      try {
+        const email = req.query.email;
+
+        const query = email ? { userEmail: email } : {};
+
+        const result = await paymentCollection
+          .find(query)
+          .sort({ createdAt: -1 }) // ⬅ Latest first
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Failed to get payment history" });
+      }
+    });
+
+    app.post("/create-payment-intent", async (req, res) => {
+      try {
+        const { amountInCents } = req.body;
+
+        if (!amountInCents || amountInCents < 1) {
+          return res.status(400).json({ error: "Invalid amount" });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amountInCents,
+          currency: "bdt",
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error("INTENT ERROR:", error);
+        res.status(500).json({ error: error.message });
       }
     });
 
