@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const { default: Stripe } = require("stripe");
+const admin = require("firebase-admin");
 
 dotenv.config();
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
@@ -12,6 +13,12 @@ const port = process.env.PORT || 5000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+const serviceAccount = require("./firebase-admin-key.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 // MongoDB connection URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.olgdgso.mongodb.net/?appName=Cluster0`;
@@ -31,13 +38,48 @@ async function run() {
     await client.connect();
 
     const db = client.db("parcelDB");
+    const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
-    // ✅ GET all parcels
-    app.get("/parcels", async (req, res) => {
-      const parcels = await parcelCollection.find().toArray();
-      res.send(parcels);
+
+    // Custom middleware to log request details
+    const verifyFBToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+      const token = authHeader.split(" ")[1]; // Assuming format "Bearer <token>"\
+      if (token) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+      // verify The Token
+      next();
+    };
+
+    app.post("/users", async (req, res) => {
+      const email = req.body.email;
+
+      const userExists = await userCollection.findOne({ email });
+
+      if (userExists) {
+        // update last login time
+        await userCollection.updateOne(
+          { email },
+          { $set: { lastLogin: new Date().toISOString() } },
+        );
+        return res.send({ message: "User already exists", inserted: false });
+      }
+
+      const user = req.body;
+      const result = await userCollection.insertOne(user);
+      res.send(result);
     });
+
+    // ✅ GET all parcels
+    // app.get("/parcels", async (req, res) => {
+    //   const parcels = await parcelCollection.find().toArray();
+    //   res.send(parcels);
+    // });
     // ✅ GET parcels by user email (optional query param)
 
     app.get("/parcels", async (req, res) => {
@@ -121,6 +163,48 @@ async function run() {
         res.status(500).send({ message: "Failed to delete parcel" });
       }
     });
+    // Tracking collection for status updates
+    app.post("/tracking", async (req, res) => {
+      const update = req.body;
+      update.updatedAt = new Date();
+
+      const result = await trackingCollection.insertOne(update);
+
+      // also update latest status into parcels collection
+      await parcelCollection.updateOne(
+        { trackingId: update.trackingId },
+        { $set: { status: update.status } },
+      );
+
+      res.send(result);
+    });
+    // Tracking collection for status updates
+    app.post("/tracking", async (req, res) => {
+      const update = req.body;
+      update.updatedAt = new Date();
+
+      const result = await trackingCollection.insertOne(update);
+
+      // also update latest status into parcels collection
+      await parcelCollection.updateOne(
+        { trackingId: update.trackingId },
+        { $set: { status: update.status } },
+      );
+
+      res.send(result);
+    });
+    // Get tracking info by tracking ID
+    app.get("/track/:trackingId", async (req, res) => {
+      const trackingId = req.params.trackingId;
+
+      const parcel = await parcelCollection.findOne({ trackingId });
+      const updates = await trackingCollection
+        .find({ trackingId })
+        .sort({ updatedAt: -1 })
+        .toArray();
+
+      res.send({ parcel, updates });
+    });
 
     // Update parcel payment status
     app.patch("/parcels/payment/:id", async (req, res) => {
@@ -158,7 +242,7 @@ async function run() {
       }
     });
     // GET API → Load Payment History (User-Specific)
-    app.get("/payments", async (req, res) => {
+    app.get("/payments", verifyFBToken, async (req, res) => {
       try {
         const email = req.query.email;
 
