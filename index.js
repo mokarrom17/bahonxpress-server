@@ -38,6 +38,7 @@ async function run() {
     await client.connect();
 
     const db = client.db("parcelDB");
+    const trackingCollection = db.collection("tracking");
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
@@ -45,15 +46,24 @@ async function run() {
     // Custom middleware to log request details
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
-      if (!authHeader) {
+
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
         return res.status(401).send({ message: "Unauthorized access" });
       }
-      const token = authHeader.split(" ")[1]; // Assuming format "Bearer <token>"\
-      if (token) {
+
+      const token = authHeader.split(" ")[1];
+
+      if (!token) {
         return res.status(401).send({ message: "Unauthorized access" });
       }
-      // verify The Token
-      next();
+
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      } catch (error) {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
     };
 
     app.post("/users", async (req, res) => {
@@ -82,12 +92,15 @@ async function run() {
     // });
     // ✅ GET parcels by user email (optional query param)
 
-    app.get("/parcels", async (req, res) => {
+    app.get("/parcels", verifyFBToken, async (req, res) => {
       try {
         const email = req.query.email;
 
-        const query = email ? { userEmail: email } : {};
-
+        // Security check
+        if (email !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden access" });
+        }
+        const query = { userEmail: email };
         const option = {
           sort: { createdAt: -1 }, // Sort by createdAt in descending order
         };
@@ -103,28 +116,27 @@ async function run() {
       }
     });
     // Get: Get a specific parcel by ID
-    app.get("/parcels/:id", async (req, res) => {
+    app.get("/parcels/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
 
-        // Convert id to ObjectId
-        const query = { _id: new ObjectId(id) };
+        const parcel = await parcelCollection.findOne({
+          _id: new ObjectId(id),
+        });
 
-        const parcel = await parcelCollection.findOne(query);
-
-        if (!parcel) {
-          return res.status(404).json({ message: "Parcel not found" });
+        if (!parcel || parcel.userEmail !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden access" });
         }
 
         res.send(parcel);
       } catch (error) {
-        console.error(error);
+        console.log(error);
         res.status(500).json({ message: "Server error" });
       }
     });
 
     // ✅ POST new parcel
-    app.post("/parcels", async (req, res) => {
+    app.post("/parcels", verifyFBToken, async (req, res) => {
       try {
         const parcelData = req.body;
 
@@ -150,9 +162,18 @@ async function run() {
       }
     });
     // ✅ Delete parcel
-    app.delete("/parcels/:id", async (req, res) => {
+    app.delete("/parcels/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
+
+        const parcel = await parcelCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!parcel || parcel.userEmail !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden" });
+        }
+
         const result = await parcelCollection.deleteOne({
           _id: new ObjectId(id),
         });
@@ -163,21 +184,7 @@ async function run() {
         res.status(500).send({ message: "Failed to delete parcel" });
       }
     });
-    // Tracking collection for status updates
-    app.post("/tracking", async (req, res) => {
-      const update = req.body;
-      update.updatedAt = new Date();
 
-      const result = await trackingCollection.insertOne(update);
-
-      // also update latest status into parcels collection
-      await parcelCollection.updateOne(
-        { trackingId: update.trackingId },
-        { $set: { status: update.status } },
-      );
-
-      res.send(result);
-    });
     // Tracking collection for status updates
     app.post("/tracking", async (req, res) => {
       const update = req.body;
@@ -229,9 +236,10 @@ async function run() {
     });
 
     // Save payment history entry
-    app.post("/payments", async (req, res) => {
+    app.post("/payments", verifyFBToken, async (req, res) => {
       try {
         const paymentInfo = req.body;
+        paymentInfo.userEmail = req.decoded.email;
         paymentInfo.createdAt = new Date().toISOString();
 
         const result = await paymentCollection.insertOne(paymentInfo);
@@ -245,22 +253,26 @@ async function run() {
     app.get("/payments", verifyFBToken, async (req, res) => {
       try {
         const email = req.query.email;
+        console.log("decoded", req.decoded);
+        if (!email) return res.status(400).json({ message: "Email required" });
+        if (email !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden access" });
+        }
 
-        const query = email ? { userEmail: email } : {};
-
+        const query = { userEmail: email };
         const result = await paymentCollection
           .find(query)
-          .sort({ createdAt: -1 }) // ⬅ Latest first
+          .sort({ createdAt: -1 })
           .toArray();
 
         res.send(result);
       } catch (error) {
-        console.error(error);
+        console.error("Error fetching payments:", error);
         res.status(500).json({ message: "Failed to get payment history" });
       }
     });
 
-    app.post("/create-payment-intent", async (req, res) => {
+    app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
       try {
         const { amountInCents } = req.body;
 
