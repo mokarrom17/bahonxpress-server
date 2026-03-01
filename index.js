@@ -42,6 +42,8 @@ async function run() {
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
+    // Rider Application Collection
+    const riderCollection = db.collection("riderApplications");
 
     // Custom middleware to log request details
     const verifyFBToken = async (req, res, next) => {
@@ -292,6 +294,101 @@ async function run() {
       } catch (error) {
         console.error("INTENT ERROR:", error);
         res.status(500).json({ error: error.message });
+      }
+    });
+
+    // Rider application endpoint
+    app.post("/riders", async (req, res) => {
+      const rider = req.body;
+      const result = await riderCollection.insertOne(rider);
+      res.send(result);
+    });
+    // GET: Load all pending rider applications
+    app.get("/riders/pending", async (req, res) => {
+      try {
+        const pendingRiders = await riderCollection
+          .find({ status: "pending" })
+          .toArray();
+        res.send(pendingRiders);
+      } catch (error) {
+        console.log("Failed to load pending riders:", error);
+        res.status(500).send({ message: "Failed to load pending riders" });
+      }
+    });
+
+    app.patch("/riders/approve/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await riderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "approved",
+              approvedAt: new Date(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.log("Approve Error", error);
+        res.status(500).send({ message: "Failed to approve rider" });
+      }
+    });
+    app.patch("/riders/reject/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await riderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "rejected",
+              rejectedAt: new Date(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.log("Reject Error", error);
+        res.status(500).send({ message: "Failed to reject rider" });
+      }
+    });
+
+    // GET: Load all active riders
+    app.get("/riders/active", async (req, res) => {
+      try {
+        const activeRiders = await riderCollection
+          .find({ status: "approved" })
+          .toArray();
+
+        res.send(activeRiders);
+      } catch (error) {
+        console.log("Failed to load active riders:", error);
+        res.status(500).send({ message: "Failed to load active riders" });
+      }
+    });
+    // PATCH: Deactivate rider (approved → pending)
+    app.patch("/riders/deactivate/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const result = await riderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "pending",
+              deactivatedAt: new Date(),
+            },
+          },
+        );
+
+        res.send(result);
+      } catch (error) {
+        console.log("Failed to deactivate rider:", error);
+        res.status(500).send({ message: "Failed to deactivate rider" });
       }
     });
 
