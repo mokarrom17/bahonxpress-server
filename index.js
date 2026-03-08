@@ -316,47 +316,6 @@ async function run() {
       }
     });
 
-    app.patch("/riders/approve/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        const result = await riderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: "approved",
-              approvedAt: new Date(),
-            },
-          },
-        );
-
-        res.send(result);
-      } catch (error) {
-        console.log("Approve Error", error);
-        res.status(500).send({ message: "Failed to approve rider" });
-      }
-    });
-    app.patch("/riders/reject/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        const result = await riderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: "rejected",
-              rejectedAt: new Date(),
-            },
-          },
-        );
-
-        res.send(result);
-      } catch (error) {
-        console.log("Reject Error", error);
-        res.status(500).send({ message: "Failed to reject rider" });
-      }
-    });
-
     // GET: Load all active riders
     app.get("/riders/active", async (req, res) => {
       try {
@@ -370,25 +329,58 @@ async function run() {
         res.status(500).send({ message: "Failed to load active riders" });
       }
     });
-    // PATCH: Deactivate rider (approved → pending)
-    app.patch("/riders/deactivate/:id", async (req, res) => {
+
+    app.patch("/riders/status/:id", async (req, res) => {
       try {
         const id = req.params.id;
+        const { status } = req.body;
+
+        // allowed status check
+        if (!["approved", "rejected", "pending"].includes(status)) {
+          return res.status(400).send({ message: "Invalid status value" });
+        }
+
+        // rider application find
+        const rider = await riderCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!rider) {
+          return res.status(404).send({ message: "Rider not found" });
+        }
+
+        const updateData = {
+          status,
+          updatedAt: new Date(),
+        };
+
+        // timestamp based on status
+        if (status === "approved") updateData.approvedAt = new Date();
+        if (status === "rejected") updateData.rejectedAt = new Date();
+        if (status === "pending") updateData.deactivatedAt = new Date();
 
         const result = await riderCollection.updateOne(
           { _id: new ObjectId(id) },
           {
-            $set: {
-              status: "pending",
-              deactivatedAt: new Date(),
-            },
+            $set: updateData,
+          },
+        );
+
+        // 2️⃣ Update user role
+        let role = "user";
+        if (status === "approved") role = "rider";
+
+        const userResult = await userCollection.updateOne(
+          { email: rider.userEmail },
+          {
+            $set: { role },
           },
         );
 
         res.send(result);
       } catch (error) {
-        console.log("Failed to deactivate rider:", error);
-        res.status(500).send({ message: "Failed to deactivate rider" });
+        console.log("Status Update Error:", error);
+        res.status(500).send({ message: "Failed to update rider status" });
       }
     });
 
