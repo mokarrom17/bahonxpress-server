@@ -273,7 +273,7 @@ async function run() {
         res.status(500).json({ message: "Failed to get payment history" });
       }
     });
-
+    // Create Payment Intent
     app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
       try {
         const { amountInCents } = req.body;
@@ -297,7 +297,7 @@ async function run() {
       }
     });
 
-    // Rider application endpoint
+    // Rider Application Routes
     app.post("/riders", async (req, res) => {
       const rider = req.body;
       const result = await riderCollection.insertOne(rider);
@@ -329,7 +329,7 @@ async function run() {
         res.status(500).send({ message: "Failed to load active riders" });
       }
     });
-
+    // PATCH: Update rider application status (approve/reject/deactivate)
     app.patch("/riders/status/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -383,6 +383,71 @@ async function run() {
         res.status(500).send({ message: "Failed to update rider status" });
       }
     });
+    // GET: Search user by email (for admin use)
+    app.get("/users/search", async (req, res) => {
+      const emailQuery = req.query.email;
+
+      if (!emailQuery) {
+        return res.status(400).send({ message: "Email query required" });
+      }
+      // Create a case-insensitive regex for partial email matching
+      const regex = new RegExp(`^${emailQuery}`, "i");
+
+      try {
+        const users = await userCollection
+          .find({ email: { $regex: regex } })
+          .project({ email: 1, createdAt: 1, role: 1, isAdmin: 1 })
+          .limit(10)
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        console.error("Error searching users:", error);
+        res.status(500).send({ message: "Error searching users" });
+      }
+    });
+    // PATCH: Promote user to admin (admin only)
+
+    app.patch("/users/:id/admin", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { isAdmin } = req.body;
+
+        // validation
+        if (typeof isAdmin !== "boolean") {
+          return res.status(400).send({
+            success: false,
+            message: "isAdmin must be true or false",
+          });
+        }
+
+        console.log("Updating admin status:", id, isAdmin);
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isAdmin } },
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({
+            success: false,
+            message: "User not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          message: isAdmin ? "User promoted to admin" : "Admin role removed",
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        console.error("Error updating admin status:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to update admin status",
+        });
+      }
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
@@ -396,7 +461,7 @@ async function run() {
 }
 run().catch(console.dir);
 
-/* ===========================
+/* =============== ============
    ROUTES
 =========================== */
 
