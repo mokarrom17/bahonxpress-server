@@ -68,6 +68,7 @@ async function run() {
       }
     };
 
+    // Create or update user on login/signup
     app.post("/users", async (req, res) => {
       const email = req.body.email;
 
@@ -409,43 +410,37 @@ async function run() {
     // PATCH: Promote user to admin (admin only)
 
     app.patch("/users/:id/admin", async (req, res) => {
+      const id = req.params.id;
+      const { isAdmin } = req.body;
+
+      const role = isAdmin ? "admin" : "user";
+
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role } },
+      );
+
+      res.send(result);
+    });
+
+    //GET: Get user role by email
+    app.get("/users/:email/role", async (req, res) => {
       try {
-        const id = req.params.id;
-        const { isAdmin } = req.body;
+        const email = req.params.email;
 
-        // validation
-        if (typeof isAdmin !== "boolean") {
-          return res.status(400).send({
-            success: false,
-            message: "isAdmin must be true or false",
-          });
+        if (!email) {
+          return res.status(400).send({ message: "Email required" });
         }
 
-        console.log("Updating admin status:", id, isAdmin);
+        const user = await userCollection.findOne({ email });
 
-        const result = await userCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { isAdmin } },
-        );
+        // default role
+        const role = user?.role || "user";
 
-        if (result.matchedCount === 0) {
-          return res.status(404).send({
-            success: false,
-            message: "User not found",
-          });
-        }
-
-        res.send({
-          success: true,
-          message: isAdmin ? "User promoted to admin" : "Admin role removed",
-          modifiedCount: result.modifiedCount,
-        });
+        res.send({ role });
       } catch (error) {
-        console.error("Error updating admin status:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to update admin status",
-        });
+        console.log("Role API error:", error);
+        res.status(500).send({ message: "Server error" });
       }
     });
 
