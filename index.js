@@ -68,6 +68,18 @@ async function run() {
       }
     };
 
+    // Admin verification middleware (for future use)
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+
     // Create or update user on login/signup
     app.post("/users", async (req, res) => {
       const email = req.body.email;
@@ -305,7 +317,7 @@ async function run() {
       res.send(result);
     });
     // GET: Load all pending rider applications
-    app.get("/riders/pending", async (req, res) => {
+    app.get("/riders/pending", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const pendingRiders = await riderCollection
           .find({ status: "pending" })
@@ -318,7 +330,7 @@ async function run() {
     });
 
     // GET: Load all active riders
-    app.get("/riders/active", async (req, res) => {
+    app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const activeRiders = await riderCollection
           .find({ status: "approved" })
@@ -409,19 +421,31 @@ async function run() {
     });
     // PATCH: Promote user to admin (admin only)
 
-    app.patch("/users/:id/admin", async (req, res) => {
-      const id = req.params.id;
-      const { isAdmin } = req.body;
+    app.patch(
+      "/users/:id/admin",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { isAdmin } = req.body;
 
-      const role = isAdmin ? "admin" : "user";
+          const role = isAdmin ? "admin" : "user";
 
-      const result = await userCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role } },
-      );
+          const result = await userCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: { role },
+            },
+          );
 
-      res.send(result);
-    });
+          res.send(result);
+        } catch (error) {
+          console.log("ADMIN UPDATE ERROR:", error);
+          res.status(500).send({ message: "Failed to update role" });
+        }
+      },
+    );
 
     //GET: Get user role by email
     app.get("/users/:email/role", async (req, res) => {
