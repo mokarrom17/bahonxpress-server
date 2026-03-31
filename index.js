@@ -44,6 +44,7 @@ async function run() {
     const paymentCollection = db.collection("payments");
     // Rider Application Collection
     const riderCollection = db.collection("riderApplications");
+    const cashOutCollection = db.collection("cashOut");
 
     // Custom middleware to log request details
     const verifyFBToken = async (req, res, next) => {
@@ -204,16 +205,19 @@ async function run() {
       verifyFBToken,
       verifyAdmin,
       async (req, res) => {
-        const email = req.decoded.email;
+        try {
+          const result = await parcelCollection
+            .find({
+              riderEmail: { $exists: true }, // 🔥 only assigned parcels
+            })
+            .sort({ assignedAt: -1 })
+            .toArray();
 
-        const result = await parcelCollection
-          .find({
-            delivery_status: "rider_assigned",
-            // riderEmail: email,
-          })
-          .toArray();
-
-        res.send(result);
+          res.send(result);
+        } catch (error) {
+          console.log("Admin Assigned Error:", error);
+          res.status(500).send({ message: "Failed to load parcels" });
+        }
       },
     );
     // Get: Get parcels assigned to the logged-in rider (rider only)
@@ -328,6 +332,7 @@ async function run() {
               delivery_status: 1,
               earning: 1, // 🔥 MUST
               updatedAt: 1,
+              isCashedOut: 1, // 🔥 MUST
             })
             .sort({ updatedAt: -1 })
             .toArray();
@@ -339,6 +344,55 @@ async function run() {
         }
       },
     );
+    app.post("/cashOut", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        // 🔥 get only unCashOut delivered parcels
+        const parcels = await parcelCollection
+          .find({
+            riderEmail: email,
+            delivery_status: "delivered",
+            isCashedOut: { $ne: true },
+          })
+          .toArray();
+
+        if (parcels.length === 0) {
+          return res.send({
+            success: false,
+            message: "No available earnings",
+          });
+        }
+
+        // 🔥 total earning
+        const totalAmount = parcels.reduce(
+          (sum, p) => sum + (p.earning || 0),
+          0,
+        );
+
+        // 🔥 save cashOut request
+        const cashOut = {
+          riderEmail: email,
+          amount: totalAmount,
+          status: "pending",
+          requestedAt: new Date(),
+          parcelIds: parcels.map((p) => p._id),
+        };
+
+        await cashOutCollection.insertOne(cashOut);
+
+        // 🔥 mark parcels as cashed out
+        await parcelCollection.updateMany(
+          { _id: { $in: parcels.map((p) => p._id) } },
+          { $set: { isCashedOut: true } },
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        console.log("CashOut Error:", error);
+        res.status(500).send({ message: "CashOut failed" });
+      }
+    });
     // Get: Get a specific parcel by ID
     app.get("/parcels/:id", verifyFBToken, async (req, res) => {
       try {
