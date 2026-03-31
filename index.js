@@ -111,6 +111,18 @@ async function run() {
       next();
     };
 
+    const verifyRider = async (req, res, next) => {
+      const user = await userCollection.findOne({
+        email: req.decoded.email,
+      });
+
+      if (!user || user.role !== "rider") {
+        return res.status(403).send({ message: "Rider only access" });
+      }
+
+      next();
+    };
+
     // Create or update user on login/signup
     app.post("/users", async (req, res) => {
       const email = req.body.email;
@@ -205,61 +217,128 @@ async function run() {
       },
     );
     // Get: Get parcels assigned to the logged-in rider (rider only)
-    app.get("/parcels/my-assigned", verifyFBToken, async (req, res) => {
-      try {
-        const email = req.decoded.email;
+    app.get(
+      "/parcels/my-assigned",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
 
-        const result = await parcelCollection
-          .find({
-            riderEmail: email,
-            delivery_status: {
-              $in: ["rider_assigned", "picked", "in_transit"],
-            },
-          })
-          .project({
-            trackingId: 1,
-            parcelName: 1,
-            receiverName: 1,
-            receiverPhone: 1,
-            receiverAddress: 1,
-            delivery_status: 1,
-            assignedAt: 1,
-          })
-          .sort({ assignedAt: -1 })
-          .toArray();
+          const result = await parcelCollection
+            .find({
+              riderEmail: email,
+              delivery_status: {
+                $in: ["rider_assigned", "picked", "in_transit"],
+              },
+            })
+            .project({
+              trackingId: 1,
+              parcelName: 1,
+              receiverName: 1,
+              receiverPhone: 1,
+              receiverAddress: 1,
+              delivery_status: 1,
+              assignedAt: 1,
+            })
+            .sort({ assignedAt: -1 })
+            .toArray();
 
-        res.send(result);
-      } catch (error) {
-        console.log("Rider Parcels Error:", error);
-        res.status(500).send({ message: "Failed to load rider parcels" });
-      }
-    });
-    // PATCH: Update parcel delivery status (rider only)
-    app.patch("/parcels/update-status/:id", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const { status } = req.body;
-
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({ message: "Invalid ID" });
+          res.send(result);
+        } catch (error) {
+          console.log("Rider Parcels Error:", error);
+          res.status(500).send({ message: "Failed to load rider parcels" });
         }
+      },
+    );
+    // PATCH: Update parcel delivery status (rider only)
+    app.patch(
+      "/parcels/update-status/:id",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { status } = req.body;
 
-        const result = await parcelCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              delivery_status: status,
-              updatedAt: new Date(),
-            },
-          },
-        );
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid ID" });
+          }
 
-        res.send(result);
-      } catch (error) {
-        console.log("Update Error:", error);
-        res.status(500).send({ message: "Failed to update status" });
-      }
-    });
+          const parcel = await parcelCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!parcel) {
+            return res.status(404).send({ message: "Parcel not found" });
+          }
+
+          let updateData = {
+            delivery_status: status,
+            updatedAt: new Date(),
+          };
+
+          // 🔥 ONLY যখন delivered হবে
+          if (status === "delivered") {
+            const total = parcel.cost?.total || 0;
+
+            let earning = 0;
+
+            if (parcel.senderDistrict === parcel.receiverDistrict) {
+              earning = total * 0.6;
+            } else {
+              earning = total * 0.85;
+            }
+
+            updateData.earning = Math.round(earning);
+          }
+
+          const result = await parcelCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updateData },
+          );
+
+          res.send(result);
+        } catch (error) {
+          console.log("Update Error:", error);
+          res.status(500).send({ message: "Failed to update status" });
+        }
+      },
+    );
+    // Get: Get delivered parcels for the logged-in rider (rider only)
+    app.get(
+      "/parcels/delivered",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const result = await parcelCollection
+            .find({
+              riderEmail: email,
+              delivery_status: "delivered",
+            })
+            .project({
+              trackingId: 1,
+              parcelName: 1,
+              receiverName: 1,
+              receiverPhone: 1,
+              receiverAddress: 1,
+              delivery_status: 1,
+              earning: 1, // 🔥 MUST
+              updatedAt: 1,
+            })
+            .sort({ updatedAt: -1 })
+            .toArray();
+
+          res.send(result);
+        } catch (error) {
+          console.log("Delivered Error:", error);
+          res.status(500).send({ message: "Failed to load deliveries" });
+        }
+      },
+    );
     // Get: Get a specific parcel by ID
     app.get("/parcels/:id", verifyFBToken, async (req, res) => {
       try {
