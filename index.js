@@ -295,6 +295,7 @@ async function run() {
             }
 
             updateData.earning = Math.round(earning);
+            updateData.isCashedOut = false;
           }
 
           const result = await parcelCollection.updateOne(
@@ -344,7 +345,7 @@ async function run() {
         }
       },
     );
-    app.post("/cashOut", verifyFBToken, verifyRider, async (req, res) => {
+    app.post("/cashout", verifyFBToken, verifyRider, async (req, res) => {
       try {
         const email = req.decoded.email;
 
