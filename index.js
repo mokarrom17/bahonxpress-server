@@ -38,13 +38,27 @@ async function run() {
     await client.connect();
 
     const db = client.db("parcelDB");
-    const trackingCollection = db.collection("tracking");
+    const trackingsCollection = db.collection("trackings");
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
     // Rider Application Collection
     const riderCollection = db.collection("riderApplications");
     const cashOutCollection = db.collection("cashOut");
+
+    // 🔥 Utility: Generate Tracking ID (Backend Only)
+    const generateTrackingId = () => {
+      const date = new Date();
+
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+
+      const timestamp = Date.now().toString().slice(-5);
+      const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+
+      return `BX-${year}${month}${day}-${timestamp}${random}`;
+    };
 
     // Custom middleware to log request details
     const verifyFBToken = async (req, res, next) => {
@@ -111,7 +125,7 @@ async function run() {
       }
       next();
     };
-
+    // Rider verification middleware
     const verifyRider = async (req, res, next) => {
       const user = await userCollection.findOne({
         email: req.decoded.email,
@@ -265,6 +279,17 @@ async function run() {
           const id = req.params.id;
           const { status } = req.body;
 
+          const validStatus = [
+            "rider_assigned",
+            "picked",
+            "in_transit",
+            "delivered",
+          ];
+
+          if (!validStatus.includes(status)) {
+            return res.status(400).send({ message: "Invalid status" });
+          }
+
           if (!ObjectId.isValid(id)) {
             return res.status(400).send({ message: "Invalid ID" });
           }
@@ -277,12 +302,29 @@ async function run() {
             return res.status(404).send({ message: "Parcel not found" });
           }
 
+          // 🔥 STATUS FLOW CONTROL (CLEAN SYSTEM)
+          const statusFlow = [
+            "rider_assigned",
+            "picked",
+            "in_transit",
+            "delivered",
+          ];
+
+          const currentIndex = statusFlow.indexOf(parcel.delivery_status);
+          const newIndex = statusFlow.indexOf(status);
+
+          if (newIndex !== currentIndex + 1) {
+            return res
+              .status(400)
+              .send({ message: "Invalid status transition" });
+          }
+
           let updateData = {
             delivery_status: status,
             updatedAt: new Date(),
           };
 
-          // 🔥 ONLY যখন delivered হবে
+          // 🔥 delivered হলে earning calculate
           if (status === "delivered") {
             const total = parcel.cost?.total || 0;
 
@@ -298,18 +340,57 @@ async function run() {
             updateData.isCashedOut = false;
           }
 
-          const result = await parcelCollection.updateOne(
+          // ✅ Update parcel
+          await parcelCollection.updateOne(
             { _id: new ObjectId(id) },
             { $set: updateData },
           );
 
-          res.send(result);
+          // 🔥🔥 ADD THIS PART (MAIN TRACKING INSERT)
+          const statusMessages = {
+            rider_assigned: "Rider has been assigned",
+            picked: "Parcel picked up by rider",
+            in_transit: "Parcel is on the way",
+            delivered: "Parcel delivered successfully",
+          };
+
+          await trackingsCollection.insertOne({
+            trackingId: parcel.trackingId,
+            status,
+            message: statusMessages[status],
+            updatedAt: new Date(),
+            updatedBy: req.decoded.email,
+          });
+
+          res.send({ success: true });
         } catch (error) {
           console.log("Update Error:", error);
           res.status(500).send({ message: "Failed to update status" });
         }
       },
     );
+    // Get: Get tracking history by tracking ID
+    app.get("/track/:trackingId", async (req, res) => {
+      try {
+        const trackingId = req.params.trackingId;
+
+        const parcel = await parcelCollection.findOne({ trackingId });
+
+        if (!parcel) {
+          return res.status(404).send({ message: "Parcel not found" });
+        }
+
+        const updates = await trackingsCollection
+          .find({ trackingId })
+          .sort({ updatedAt: -1 })
+          .toArray();
+
+        res.send({ parcel, updates });
+      } catch (error) {
+        console.log("Track API Error:", error);
+        res.status(500).send({ message: "Failed to load tracking data" });
+      }
+    });
     // Get: Get delivered parcels for the logged-in rider (rider only)
     app.get(
       "/parcels/delivered",
@@ -419,29 +500,47 @@ async function run() {
     });
 
     // ✅ POST new parcel
+    // ✅ CREATE PARCEL (PRODUCTION VERSION)
     app.post("/parcels", verifyFBToken, async (req, res) => {
       try {
-        const parcelData = req.body;
+        const body = req.body;
+
+        // 🔥 Generate tracking ID in backend
+        const trackingId = generateTrackingId();
 
         const newParcel = {
-          ...parcelData,
-          status: "pending",
+          ...body,
+          trackingId,
+          delivery_status: "pending",
           paymentStatus: "unpaid",
           createdAt: new Date(),
+          updatedAt: new Date(),
         };
 
+        // ✅ Insert parcel
         const result = await parcelCollection.insertOne(newParcel);
 
-        res.status(201).json({
+        // 🔥 INITIAL TRACKING ENTRY
+        await trackingsCollection.insertOne({
+          trackingId,
+          status: "pending",
+          message: "Parcel created",
+          updatedAt: new Date(),
+          updatedBy: req.decoded.email,
+        });
+
+        res.status(201).send({
           success: true,
           message: "Parcel created successfully",
+          trackingId, // 🔥 return to frontend
           insertedId: result.insertedId,
         });
       } catch (error) {
-        console.error("Parcel Insert Error:", error);
-        res
-          .status(500)
-          .json({ success: false, message: "Internal Server Error" });
+        console.error("Parcel Create Error:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to create parcel",
+        });
       }
     });
     // ✅ Delete parcel
@@ -472,40 +571,13 @@ async function run() {
       }
     });
 
-    // Tracking collection for status updates
-    app.post("/tracking", async (req, res) => {
-      const update = req.body;
-      update.updatedAt = new Date();
-
-      const result = await trackingCollection.insertOne(update);
-
-      // also update latest status into parcels collection
-      await parcelCollection.updateOne(
-        { trackingId: update.trackingId },
-        { $set: { status: update.status } },
-      );
-
-      res.send(result);
-    });
-    // Get tracking info by tracking ID
-    app.get("/track/:trackingId", async (req, res) => {
-      const trackingId = req.params.trackingId;
-
-      const parcel = await parcelCollection.findOne({ trackingId });
-      const updates = await trackingCollection
-        .find({ trackingId })
-        .sort({ updatedAt: -1 })
-        .toArray();
-
-      res.send({ parcel, updates });
-    });
-
     // Update parcel payment status
-    app.patch("/parcels/payment/:id", async (req, res) => {
+    app.patch("/parcels/payment/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
 
-        const result = await parcelCollection.updateOne(
+        // ✅ update payment
+        await parcelCollection.updateOne(
           { _id: new ObjectId(id) },
           {
             $set: {
@@ -515,7 +587,28 @@ async function run() {
           },
         );
 
-        res.send(result);
+        // ✅ get parcel
+        const parcel = await parcelCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        // 🔥 DUPLICATE CHECK (ADD THIS PART)
+        const existing = await trackingsCollection.findOne({
+          trackingId: parcel.trackingId,
+          status: "paid",
+        });
+
+        if (!existing) {
+          await trackingsCollection.insertOne({
+            trackingId: parcel.trackingId,
+            status: "paid",
+            message: "Payment completed successfully",
+            updatedAt: new Date(),
+            updatedBy: req.decoded.email,
+          });
+        }
+
+        res.send({ success: true });
       } catch (error) {
         console.error(error);
         res.status(500).json({ message: "Failed to update payment status" });
@@ -746,38 +839,50 @@ async function run() {
     });
 
     // PATCH: Assign rider to parcel (admin only)
-    app.patch(
-      "/parcels/assign-rider/:id",
-      verifyFBToken,
-      verifyAdmin,
-      async (req, res) => {
-        try {
-          const id = req.params.id;
-          const { riderId, riderEmail } = req.body;
+    app.patch("/parcels/assign-rider/:id", async (req, res) => {
+      const id = req.params.id;
+      const { riderId } = req.body;
 
-          if (!ObjectId.isValid(id)) {
-            return res.status(400).send({ message: "Invalid parcel id" });
-          }
+      const parcel = await parcelCollection.findOne({
+        _id: new ObjectId(id),
+      });
 
-          const result = await parcelCollection.updateOne(
-            { _id: new ObjectId(id) },
-            {
-              $set: {
-                riderId,
-                riderEmail,
-                delivery_status: "rider_assigned",
-                assignedAt: new Date(),
-              },
-            },
-          );
+      // 🔥 get rider info
+      const rider = await riderCollection.findOne({
+        _id: new ObjectId(riderId),
+      });
 
-          res.send(result);
-        } catch (error) {
-          console.log("Assign Rider Error:", error);
-          res.status(500).send({ message: "Failed to assign rider" });
-        }
-      },
-    );
+      // ✅ assign rider + email
+      await parcelCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            riderId,
+            riderEmail: rider.userEmail,
+            delivery_status: "rider_assigned",
+            assignedAt: new Date(), // optional but useful
+          },
+        },
+      );
+
+      // tracking (same as before)
+      const existing = await trackingsCollection.findOne({
+        trackingId: parcel.trackingId,
+        status: "rider_assigned",
+      });
+
+      if (!existing) {
+        await trackingsCollection.insertOne({
+          trackingId: parcel.trackingId,
+          status: "rider_assigned",
+          message: "Rider has been assigned",
+          updatedAt: new Date(),
+          updatedBy: "admin",
+        });
+      }
+
+      res.send({ success: true });
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
