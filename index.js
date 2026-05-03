@@ -447,6 +447,106 @@ async function run() {
       },
     );
 
+    // GET /stats/delivery-revenue — মাসিক delivery count + revenue একসাথে (admin only)
+    app.get(
+      "/stats/delivery-revenue",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const [deliveries, revenues] = await Promise.all([
+            // প্রতি মাসে কতটা delivered হয়েছে
+            parcelCollection
+              .aggregate([
+                {
+                  $match: {
+                    delivery_status: "delivered",
+                    deliveryDate: { $ne: null },
+                  },
+                },
+                {
+                  $group: {
+                    _id: {
+                      year: { $year: { $toDate: "$deliveryDate" } },
+                      month: { $month: { $toDate: "$deliveryDate" } },
+                    },
+                    deliveries: { $sum: 1 },
+                  },
+                },
+                { $sort: { "_id.year": 1, "_id.month": 1 } },
+                { $limit: 12 },
+              ])
+              .toArray(),
+
+            // প্রতি মাসে কত revenue
+            paymentCollection
+              .aggregate([
+                {
+                  $group: {
+                    _id: {
+                      year: { $year: { $toDate: "$createdAt" } },
+                      month: { $month: { $toDate: "$createdAt" } },
+                    },
+                    revenue: { $sum: "$amount" },
+                  },
+                },
+                { $sort: { "_id.year": 1, "_id.month": 1 } },
+                { $limit: 12 },
+              ])
+              .toArray(),
+          ]);
+
+          const monthNames = [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+          ];
+
+          // সব unique মাস collect করা
+          const monthMap = {};
+
+          deliveries.forEach((d) => {
+            const key = `${d._id.year}-${String(d._id.month).padStart(2, "0")}`;
+            monthMap[key] = {
+              month: `${monthNames[d._id.month - 1]} ${d._id.year}`,
+              deliveries: d.deliveries,
+              revenue: 0,
+            };
+          });
+
+          revenues.forEach((r) => {
+            const key = `${r._id.year}-${String(r._id.month).padStart(2, "0")}`;
+            if (monthMap[key]) {
+              monthMap[key].revenue = r.revenue;
+            } else {
+              monthMap[key] = {
+                month: `${monthNames[r._id.month - 1]} ${r._id.year}`,
+                deliveries: 0,
+                revenue: r.revenue,
+              };
+            }
+          });
+
+          const result = Object.keys(monthMap)
+            .sort()
+            .map((key) => monthMap[key]);
+
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load comparison data" });
+        }
+      },
+    );
+
     // GET /parcels/:id — নির্দিষ্ট একটি পার্সেল (owner only)
     // ⚠️ সব specific parcel route এর পরে রাখতে হবে
     app.get("/parcels/:id", verifyFBToken, async (req, res) => {
