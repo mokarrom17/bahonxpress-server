@@ -2,28 +2,35 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const { default: Stripe } = require("stripe");
 const admin = require("firebase-admin");
 
 dotenv.config();
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
+
+/* ===================================================
+   APP INITIALIZATION
+=================================================== */
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
+// Core Middleware
 app.use(cors());
 app.use(express.json());
 
+/* ===================================================
+   FIREBASE ADMIN INITIALIZATION
+=================================================== */
 const serviceAccount = require("./firebase-admin-key.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-// MongoDB connection URI
+/* ===================================================
+   MONGODB CONNECTION
+=================================================== */
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.olgdgso.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -32,39 +39,45 @@ const client = new MongoClient(uri, {
   },
 });
 
+/* ===================================================
+   MAIN SERVER FUNCTION
+=================================================== */
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
 
+    /* --------------------------------------------------
+       DATABASE COLLECTIONS
+    -------------------------------------------------- */
     const db = client.db("parcelDB");
-    const trackingsCollection = db.collection("trackings");
     const userCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
+    const trackingsCollection = db.collection("trackings");
     const paymentCollection = db.collection("payments");
-    // Rider Application Collection
     const riderCollection = db.collection("riderApplications");
     const cashOutCollection = db.collection("cashOut");
 
-    // 🔥 Utility: Generate Tracking ID (Backend Only)
+    /* --------------------------------------------------
+       UTILITY: Tracking ID Generator
+       Format: BX-YYYYMMDD-XXXXXAAAA
+    -------------------------------------------------- */
     const generateTrackingId = () => {
       const date = new Date();
-
       const year = date.getFullYear();
       const month = String(date.getMonth() + 1).padStart(2, "0");
       const day = String(date.getDate()).padStart(2, "0");
-
       const timestamp = Date.now().toString().slice(-5);
       const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-
       return `BX-${year}${month}${day}-${timestamp}${random}`;
     };
 
-    // Custom middleware to log request details
+    /* ==================================================
+       MIDDLEWARE
+    ================================================== */
+
+    // Firebase Token Verification — সব protected route এ ব্যবহার হয়
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
-
-      // console.log("HEADER:", authHeader); // 👈 ADD THIS
 
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         return res.status(401).send({ message: "Unauthorized access" });
@@ -81,139 +94,176 @@ async function run() {
         req.decoded = decoded;
         next();
       } catch (error) {
-        // console.log("VERIFY ERROR:", error.message);
         return res.status(403).send({ message: "Forbidden access" });
       }
     };
 
-    // const verifyFBToken = async (req, res, next) => {
-    //   const authHeader = req.headers.authorization;
-
-    //   console.log("STEP 1 HEADER:", authHeader);
-
-    //   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    //     console.log("STEP 2 NO HEADER");
-    //     return res.status(401).send({ message: "Unauthorized access" });
-    //   }
-
-    //   const token = authHeader.split(" ")[1];
-
-    //   console.log("STEP 3 TOKEN RECEIVED");
-
-    //   try {
-    //     console.log("STEP 4 BEFORE VERIFY");
-
-    //     const decoded = await admin.auth().verifyIdToken(token);
-
-    //     console.log("STEP 5 AFTER VERIFY", decoded);
-
-    //     req.decoded = decoded;
-    //     next();
-    //   } catch (error) {
-    //     console.log("STEP ERROR:", error); // 🔥 MUST ADD
-    //     return res.status(403).send({ message: "Forbidden access" });
-    //   }
-    // };
-    // Admin verification middleware (for future use)
+    // Admin Verification — verifyFBToken এর পরে ব্যবহার করতে হবে
     const verifyAdmin = async (req, res, next) => {
-      const email = req.decoded.email;
-      const query = { email };
-      const user = await userCollection.findOne(query);
-
+      const user = await userCollection.findOne({ email: req.decoded.email });
       if (!user || user.role !== "admin") {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.status(403).send({ message: "Forbidden access" });
       }
       next();
     };
-    // Rider verification middleware
-    const verifyRider = async (req, res, next) => {
-      const user = await userCollection.findOne({
-        email: req.decoded.email,
-      });
 
+    // Rider Verification — verifyFBToken এর পরে ব্যবহার করতে হবে
+    const verifyRider = async (req, res, next) => {
+      const user = await userCollection.findOne({ email: req.decoded.email });
       if (!user || user.role !== "rider") {
         return res.status(403).send({ message: "Rider only access" });
       }
-
       next();
     };
 
-    // Create or update user on login/signup
+    /* ==================================================
+       USER ROUTES
+    ================================================== */
+
+    // POST /users — নতুন user তৈরি বা last login আপডেট
     app.post("/users", async (req, res) => {
-      const email = req.body.email;
+      try {
+        const email = req.body.email;
+        const userExists = await userCollection.findOne({ email });
 
-      const userExists = await userCollection.findOne({ email });
+        if (userExists) {
+          await userCollection.updateOne(
+            { email },
+            { $set: { lastLogin: new Date().toISOString() } },
+          );
+          return res.send({ message: "User already exists", inserted: false });
+        }
 
-      if (userExists) {
-        // update last login time
-        await userCollection.updateOne(
-          { email },
-          { $set: { lastLogin: new Date().toISOString() } },
-        );
-        return res.send({ message: "User already exists", inserted: false });
+        const result = await userCollection.insertOne(req.body);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to create user" });
       }
-
-      const user = req.body;
-      const result = await userCollection.insertOne(user);
-      res.send(result);
     });
 
-    // ✅ GET all parcels
-    // app.get("/parcels", async (req, res) => {
-    //   const parcels = await parcelCollection.find().toArray();
-    //   res.send(parcels);
-    // });
+    // GET /users/search — email দিয়ে user খোঁজা (admin only)
+    // ⚠️ /users/:email/role এর আগে থাকতে হবে
+    app.get("/users/search", verifyFBToken, verifyAdmin, async (req, res) => {
+      const emailQuery = req.query.email;
 
-    // ✅ GET parcels by user email (optional query param)
+      if (!emailQuery) {
+        return res.status(400).send({ message: "Email query required" });
+      }
+
+      try {
+        const regex = new RegExp(`^${emailQuery}`, "i");
+        const users = await userCollection
+          .find({ email: { $regex: regex } })
+          .project({ email: 1, createdAt: 1, role: 1 })
+          .limit(10)
+          .toArray();
+
+        res.send(users);
+      } catch (error) {
+        res.status(500).send({ message: "Error searching users" });
+      }
+    });
+
+    // GET /users/:email/role — user এর role জানা (public)
+    app.get("/users/:email/role", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        if (!email) {
+          return res.status(400).send({ message: "Email required" });
+        }
+
+        const user = await userCollection.findOne({ email });
+        const role = user?.role || "user";
+
+        res.send({ role });
+      } catch (error) {
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    // PATCH /users/:id/admin — user কে admin বানানো বা সরানো (admin only)
+    app.patch(
+      "/users/:id/admin",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { isAdmin } = req.body;
+          const role = isAdmin ? "admin" : "user";
+
+          const result = await userCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { role } },
+          );
+
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to update role" });
+        }
+      },
+    );
+
+    /* ==================================================
+       PARCEL ROUTES
+       ⚠️ ROUTE ORDER (IMPORTANT):
+          Specific routes → Dynamic :id route
+          নিচের order ঠিক রাখতে হবে, নাহলে :id সব ধরে ফেলবে
+    ================================================== */
+
+    // GET /parcels — সব বা নিজের পার্সেল (role-based)
     app.get("/parcels", verifyFBToken, async (req, res) => {
       try {
         const email = req.query.email;
+        const status = req.query.status;
+        const decodedEmail = req.decoded.email;
 
-        // Security check
-        if (email !== req.decoded.email) {
-          return res.status(403).json({ message: "Forbidden access" });
+        const user = await userCollection.findOne({ email: decodedEmail });
+
+        let query = {};
+
+        if (user?.role !== "admin") {
+          if (email !== decodedEmail) {
+            return res.status(403).send({ message: "Forbidden access" });
+          }
+          query.userEmail = decodedEmail;
         }
-        const query = { userEmail: email };
-        const option = {
-          sort: { createdAt: -1 }, // Sort by createdAt in descending order
-        };
-        console.log("parcel query", req.query, query, option);
 
-        const parcels = await parcelCollection.find(query, option).toArray();
+        if (status && status !== "all") {
+          query.delivery_status = status;
+        }
 
-        res.status(200).json(parcels);
+        const parcels = await parcelCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(parcels);
       } catch (error) {
-        console.error("Failed to fetch parcels:", error);
-        res.status(500).json({
-          message: "Failed to fetch parcels",
-        });
+        res.status(500).send({ message: "Failed to fetch parcels" });
       }
     });
-    // Get: Get all pending parcels (admin only)
+
+    // GET /parcels/pending — paid কিন্তু rider assign হয়নি (admin only)
     app.get(
       "/parcels/pending",
       verifyFBToken,
       verifyAdmin,
       async (req, res) => {
         try {
-          const query = {
-            paymentStatus: "paid",
-            delivery_status: "pending",
-          };
-
           const parcels = await parcelCollection
-            .find(query)
-            .sort({ createdAt: 1 }) // oldest first
+            .find({ paymentStatus: "paid", delivery_status: "pending" })
+            .sort({ createdAt: 1 })
             .toArray();
 
           res.send(parcels);
         } catch (error) {
-          console.log(error);
           res.status(500).send({ message: "Failed to load parcels" });
         }
       },
     );
-    // Get: Get parcels assigned to a rider (rider only)
+
+    // GET /parcels/assigned — rider assign হয়েছে এমন সব পার্সেল (admin only)
     app.get(
       "/parcels/assigned",
       verifyFBToken,
@@ -221,20 +271,18 @@ async function run() {
       async (req, res) => {
         try {
           const result = await parcelCollection
-            .find({
-              riderEmail: { $exists: true }, // 🔥 only assigned parcels
-            })
+            .find({ riderEmail: { $exists: true } })
             .sort({ assignedAt: -1 })
             .toArray();
 
           res.send(result);
         } catch (error) {
-          console.log("Admin Assigned Error:", error);
           res.status(500).send({ message: "Failed to load parcels" });
         }
       },
     );
-    // Get: Get parcels assigned to the logged-in rider (rider only)
+
+    // GET /parcels/my-assigned — rider এর নিজের assigned পার্সেল (rider only)
     app.get(
       "/parcels/my-assigned",
       verifyFBToken,
@@ -264,12 +312,303 @@ async function run() {
 
           res.send(result);
         } catch (error) {
-          console.log("Rider Parcels Error:", error);
           res.status(500).send({ message: "Failed to load rider parcels" });
         }
       },
     );
-    // PATCH: Update parcel delivery status (rider only)
+
+    // GET /parcels/delivered — rider এর সম্পন্ন ডেলিভারি (rider only)
+    app.get(
+      "/parcels/delivered",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const result = await parcelCollection
+            .find({ riderEmail: email, delivery_status: "delivered" })
+            .project({
+              trackingId: 1,
+              parcelName: 1,
+              receiverName: 1,
+              receiverPhone: 1,
+              receiverAddress: 1,
+              delivery_status: 1,
+              earning: 1,
+              updatedAt: 1,
+              isCashedOut: 1,
+            })
+            .sort({ updatedAt: -1 })
+            .toArray();
+
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load deliveries" });
+        }
+      },
+    );
+
+    // GET /parcels/delivery-trend — দৈনিক ডেলিভারি trend data (chart এর জন্য)
+    // ⚠️ এই route অবশ্যই /parcels/:id এর আগে থাকতে হবে
+    app.get("/parcels/delivery-trend", async (req, res) => {
+      try {
+        const parcels = await parcelCollection
+          .find({ delivery_status: "delivered", deliveryDate: { $ne: null } })
+          .toArray();
+
+        const result = {};
+
+        parcels.forEach((p) => {
+          if (!p.deliveryDate) return;
+          const date = new Date(p.deliveryDate);
+          if (isNaN(date)) return;
+          const formatted = date.toISOString().split("T")[0];
+          result[formatted] = (result[formatted] || 0) + 1;
+        });
+
+        const finalData = Object.keys(result)
+          .sort()
+          .map((date) => ({ date, total: result[date] }));
+
+        res.send(finalData);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load delivery trend" });
+      }
+    });
+
+    // GET /parcels/delivery/status-count — delivery status অনুযায়ী count (chart)
+    // ⚠️ এই route অবশ্যই /parcels/:id এর আগে থাকতে হবে
+    app.get(
+      "/parcels/delivery/status-count",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const pipeline = [
+            { $group: { _id: "$delivery_status", count: { $sum: 1 } } },
+            { $project: { status: "$_id", count: 1, _id: 0 } },
+          ];
+
+          const result = await parcelCollection.aggregate(pipeline).toArray();
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load status counts" });
+        }
+      },
+    );
+
+    // GET /stats/revenue-monthly — মাসিক revenue (admin only)
+    app.get(
+      "/stats/revenue-monthly",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const pipeline = [
+            {
+              $group: {
+                _id: {
+                  year: { $year: { $toDate: "$createdAt" } },
+                  month: { $month: { $toDate: "$createdAt" } },
+                },
+                total: { $sum: "$amount" },
+              },
+            },
+            { $sort: { "_id.year": 1, "_id.month": 1 } },
+            { $limit: 12 },
+          ];
+
+          const result = await paymentCollection.aggregate(pipeline).toArray();
+
+          const monthNames = [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+          ];
+
+          const formatted = result.map((r) => ({
+            month: `${monthNames[r._id.month - 1]} ${r._id.year}`,
+            revenue: r.total,
+          }));
+
+          res.send(formatted);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load revenue data" });
+        }
+      },
+    );
+
+    // GET /parcels/:id — নির্দিষ্ট একটি পার্সেল (owner only)
+    // ⚠️ সব specific parcel route এর পরে রাখতে হবে
+    app.get("/parcels/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid parcel id" });
+        }
+
+        const parcel = await parcelCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!parcel || parcel.userEmail !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden access" });
+        }
+
+        res.send(parcel);
+      } catch (error) {
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // POST /parcels — নতুন পার্সেল তৈরি (authenticated user)
+    app.post("/parcels", verifyFBToken, async (req, res) => {
+      try {
+        const trackingId = generateTrackingId();
+
+        const newParcel = {
+          ...req.body,
+          trackingId,
+          delivery_status: "pending",
+          paymentStatus: "unpaid",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        const result = await parcelCollection.insertOne(newParcel);
+
+        // প্রথম tracking entry
+        await trackingsCollection.insertOne({
+          trackingId,
+          status: "pending",
+          message: "Parcel created",
+          updatedAt: new Date(),
+          updatedBy: req.decoded.email,
+        });
+
+        res.status(201).send({
+          success: true,
+          message: "Parcel created successfully",
+          trackingId,
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to create parcel" });
+      }
+    });
+
+    // PATCH /parcels/payment/:id — payment সম্পন্ন হলে status আপডেট
+    app.patch("/parcels/payment/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              paymentStatus: "paid",
+              paymentDate: new Date().toISOString(),
+            },
+          },
+        );
+
+        const parcel = await parcelCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        // duplicate check
+        const existing = await trackingsCollection.findOne({
+          trackingId: parcel.trackingId,
+          status: "paid",
+        });
+
+        if (!existing) {
+          await trackingsCollection.insertOne({
+            trackingId: parcel.trackingId,
+            status: "paid",
+            message: "Payment completed successfully",
+            updatedAt: new Date(),
+            updatedBy: req.decoded.email,
+          });
+        }
+
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).json({ message: "Failed to update payment status" });
+      }
+    });
+
+    // PATCH /parcels/assign-rider/:id — পার্সেলে rider assign করা (admin only)
+    app.patch(
+      "/parcels/assign-rider/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { riderId } = req.body;
+
+          const parcel = await parcelCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          const rider = await riderCollection.findOne({
+            _id: new ObjectId(riderId),
+          });
+
+          if (!parcel || !rider) {
+            return res
+              .status(404)
+              .send({ message: "Parcel or Rider not found" });
+          }
+
+          await parcelCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                riderId,
+                riderEmail: rider.userEmail,
+                delivery_status: "rider_assigned",
+                assignedAt: new Date(),
+              },
+            },
+          );
+
+          // duplicate tracking check
+          const existing = await trackingsCollection.findOne({
+            trackingId: parcel.trackingId,
+            status: "rider_assigned",
+          });
+
+          if (!existing) {
+            await trackingsCollection.insertOne({
+              trackingId: parcel.trackingId,
+              status: "rider_assigned",
+              message: "Rider has been assigned",
+              updatedAt: new Date(),
+              updatedBy: req.decoded.email,
+            });
+          }
+
+          res.send({ success: true });
+        } catch (error) {
+          res.status(500).send({ message: "Failed to assign rider" });
+        }
+      },
+    );
+
+    // PATCH /parcels/update-status/:id — delivery status আপডেট (rider only)
     app.patch(
       "/parcels/update-status/:id",
       verifyFBToken,
@@ -302,14 +641,13 @@ async function run() {
             return res.status(404).send({ message: "Parcel not found" });
           }
 
-          // 🔥 STATUS FLOW CONTROL (CLEAN SYSTEM)
+          // status flow: rider_assigned → picked → in_transit → delivered
           const statusFlow = [
             "rider_assigned",
             "picked",
             "in_transit",
             "delivered",
           ];
-
           const currentIndex = statusFlow.indexOf(parcel.delivery_status);
           const newIndex = statusFlow.indexOf(status);
 
@@ -319,34 +657,26 @@ async function run() {
               .send({ message: "Invalid status transition" });
           }
 
-          let updateData = {
-            delivery_status: status,
-            updatedAt: new Date(),
-          };
+          let updateData = { delivery_status: status, updatedAt: new Date() };
 
-          // 🔥 delivered হলে earning calculate
-          if (status === "delivered") {
+          // delivered হলে rider এর earning calculate করা হয়
+          if (status === "delivered" && !parcel.deliveryDate) {
             const total = parcel.cost?.total || 0;
-
-            let earning = 0;
-
-            if (parcel.senderDistrict === parcel.receiverDistrict) {
-              earning = total * 0.6;
-            } else {
-              earning = total * 0.85;
-            }
+            const isSameDistrict =
+              parcel.senderDistrict === parcel.receiverDistrict;
+            const earning = isSameDistrict ? total * 0.6 : total * 0.85;
 
             updateData.earning = Math.round(earning);
             updateData.isCashedOut = false;
+            updateData.deliveryDate = new Date();
           }
 
-          // ✅ Update parcel
           await parcelCollection.updateOne(
             { _id: new ObjectId(id) },
             { $set: updateData },
           );
 
-          // 🔥🔥 ADD THIS PART (MAIN TRACKING INSERT)
+          // tracking history update
           const statusMessages = {
             rider_assigned: "Rider has been assigned",
             picked: "Parcel picked up by rider",
@@ -364,186 +694,12 @@ async function run() {
 
           res.send({ success: true });
         } catch (error) {
-          console.log("Update Error:", error);
           res.status(500).send({ message: "Failed to update status" });
         }
       },
     );
-    // Get: Get tracking history by tracking ID
-    app.get("/track/:trackingId", async (req, res) => {
-      try {
-        const trackingId = req.params.trackingId;
 
-        const parcel = await parcelCollection.findOne({ trackingId });
-
-        if (!parcel) {
-          return res.status(404).send({ message: "Parcel not found" });
-        }
-
-        const updates = await trackingsCollection
-          .find({ trackingId })
-          .sort({ updatedAt: -1 })
-          .toArray();
-
-        res.send({ parcel, updates });
-      } catch (error) {
-        console.log("Track API Error:", error);
-        res.status(500).send({ message: "Failed to load tracking data" });
-      }
-    });
-    // Get: Get delivered parcels for the logged-in rider (rider only)
-    app.get(
-      "/parcels/delivered",
-      verifyFBToken,
-      verifyRider,
-      async (req, res) => {
-        try {
-          const email = req.decoded.email;
-
-          const result = await parcelCollection
-            .find({
-              riderEmail: email,
-              delivery_status: "delivered",
-            })
-            .project({
-              trackingId: 1,
-              parcelName: 1,
-              receiverName: 1,
-              receiverPhone: 1,
-              receiverAddress: 1,
-              delivery_status: 1,
-              earning: 1, // 🔥 MUST
-              updatedAt: 1,
-              isCashedOut: 1, // 🔥 MUST
-            })
-            .sort({ updatedAt: -1 })
-            .toArray();
-
-          res.send(result);
-        } catch (error) {
-          console.log("Delivered Error:", error);
-          res.status(500).send({ message: "Failed to load deliveries" });
-        }
-      },
-    );
-    app.post("/cashout", verifyFBToken, verifyRider, async (req, res) => {
-      try {
-        const email = req.decoded.email;
-
-        // 🔥 get only unCashOut delivered parcels
-        const parcels = await parcelCollection
-          .find({
-            riderEmail: email,
-            delivery_status: "delivered",
-            isCashedOut: { $ne: true },
-          })
-          .toArray();
-
-        if (parcels.length === 0) {
-          return res.send({
-            success: false,
-            message: "No available earnings",
-          });
-        }
-
-        // 🔥 total earning
-        const totalAmount = parcels.reduce(
-          (sum, p) => sum + (p.earning || 0),
-          0,
-        );
-
-        // 🔥 save cashOut request
-        const cashOut = {
-          riderEmail: email,
-          amount: totalAmount,
-          status: "pending",
-          requestedAt: new Date(),
-          parcelIds: parcels.map((p) => p._id),
-        };
-
-        await cashOutCollection.insertOne(cashOut);
-
-        // 🔥 mark parcels as cashed out
-        await parcelCollection.updateMany(
-          { _id: { $in: parcels.map((p) => p._id) } },
-          { $set: { isCashedOut: true } },
-        );
-
-        res.send({ success: true });
-      } catch (error) {
-        console.log("CashOut Error:", error);
-        res.status(500).send({ message: "CashOut failed" });
-      }
-    });
-    // Get: Get a specific parcel by ID
-    app.get("/parcels/:id", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({ message: "Invalid parcel id" });
-        }
-
-        const parcel = await parcelCollection.findOne({
-          _id: new ObjectId(id),
-        });
-
-        if (!parcel || parcel.userEmail !== req.decoded.email) {
-          return res.status(403).json({ message: "Forbidden access" });
-        }
-
-        res.send(parcel);
-      } catch (error) {
-        console.log(error);
-        res.status(500).json({ message: "Server error" });
-      }
-    });
-
-    // ✅ POST new parcel
-    // ✅ CREATE PARCEL (PRODUCTION VERSION)
-    app.post("/parcels", verifyFBToken, async (req, res) => {
-      try {
-        const body = req.body;
-
-        // 🔥 Generate tracking ID in backend
-        const trackingId = generateTrackingId();
-
-        const newParcel = {
-          ...body,
-          trackingId,
-          delivery_status: "pending",
-          paymentStatus: "unpaid",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
-
-        // ✅ Insert parcel
-        const result = await parcelCollection.insertOne(newParcel);
-
-        // 🔥 INITIAL TRACKING ENTRY
-        await trackingsCollection.insertOne({
-          trackingId,
-          status: "pending",
-          message: "Parcel created",
-          updatedAt: new Date(),
-          updatedBy: req.decoded.email,
-        });
-
-        res.status(201).send({
-          success: true,
-          message: "Parcel created successfully",
-          trackingId, // 🔥 return to frontend
-          insertedId: result.insertedId,
-        });
-      } catch (error) {
-        console.error("Parcel Create Error:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to create parcel",
-        });
-      }
-    });
-    // ✅ Delete parcel
+    // DELETE /parcels/:id — পার্সেল মুছে ফেলা (owner only)
     app.delete("/parcels/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
@@ -563,95 +719,42 @@ async function run() {
         const result = await parcelCollection.deleteOne({
           _id: new ObjectId(id),
         });
-
         res.send(result);
       } catch (error) {
-        console.error("Error deleting parcel: ", error);
         res.status(500).send({ message: "Failed to delete parcel" });
       }
     });
 
-    // Update parcel payment status
-    app.patch("/parcels/payment/:id", verifyFBToken, async (req, res) => {
+    /* ==================================================
+       TRACKING ROUTES
+    ================================================== */
+
+    // GET /track/:trackingId — tracking ID দিয়ে পার্সেলের ইতিহাস (public)
+    app.get("/track/:trackingId", async (req, res) => {
       try {
-        const id = req.params.id;
+        const trackingId = req.params.trackingId;
+        const parcel = await parcelCollection.findOne({ trackingId });
 
-        // ✅ update payment
-        await parcelCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              paymentStatus: "paid",
-              paymentDate: new Date().toISOString(),
-            },
-          },
-        );
-
-        // ✅ get parcel
-        const parcel = await parcelCollection.findOne({
-          _id: new ObjectId(id),
-        });
-
-        // 🔥 DUPLICATE CHECK (ADD THIS PART)
-        const existing = await trackingsCollection.findOne({
-          trackingId: parcel.trackingId,
-          status: "paid",
-        });
-
-        if (!existing) {
-          await trackingsCollection.insertOne({
-            trackingId: parcel.trackingId,
-            status: "paid",
-            message: "Payment completed successfully",
-            updatedAt: new Date(),
-            updatedBy: req.decoded.email,
-          });
+        if (!parcel) {
+          return res.status(404).send({ message: "Parcel not found" });
         }
 
-        res.send({ success: true });
-      } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: "Failed to update payment status" });
-      }
-    });
-
-    // Save payment history entry
-    app.post("/payments", verifyFBToken, async (req, res) => {
-      try {
-        const paymentInfo = req.body;
-        paymentInfo.userEmail = req.decoded.email;
-        paymentInfo.createdAt = new Date().toISOString();
-
-        const result = await paymentCollection.insertOne(paymentInfo);
-        res.send(result);
-      } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: "Failed to save payment history" });
-      }
-    });
-    // GET API → Load Payment History (User-Specific)
-    app.get("/payments", verifyFBToken, async (req, res) => {
-      try {
-        const email = req.query.email;
-        console.log("decoded", req.decoded);
-        if (!email) return res.status(400).json({ message: "Email required" });
-        if (email !== req.decoded.email) {
-          return res.status(403).json({ message: "Forbidden access" });
-        }
-
-        const query = { userEmail: email };
-        const result = await paymentCollection
-          .find(query)
-          .sort({ createdAt: -1 })
+        const updates = await trackingsCollection
+          .find({ trackingId })
+          .sort({ updatedAt: -1 })
           .toArray();
 
-        res.send(result);
+        res.send({ parcel, updates });
       } catch (error) {
-        console.error("Error fetching payments:", error);
-        res.status(500).json({ message: "Failed to get payment history" });
+        res.status(500).send({ message: "Failed to load tracking data" });
       }
     });
-    // Create Payment Intent
+
+    /* ==================================================
+       PAYMENT ROUTES
+    ================================================== */
+
+    // POST /create-payment-intent — Stripe payment intent তৈরি
     app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
       try {
         const { amountInCents } = req.body;
@@ -662,59 +765,84 @@ async function run() {
 
         const paymentIntent = await stripe.paymentIntents.create({
           amount: amountInCents,
-          currency: "bdt",
+          currency: "usd",
           payment_method_types: ["card"],
         });
 
-        res.send({
-          clientSecret: paymentIntent.client_secret,
-        });
+        res.send({ clientSecret: paymentIntent.client_secret });
       } catch (error) {
-        console.error("INTENT ERROR:", error);
         res.status(500).json({ error: error.message });
       }
     });
 
-    // Rider routes
-    app.get("/riders/available", async (req, res) => {
-      const { district } = req.query;
-
+    // POST /payments — payment history সংরক্ষণ
+    app.post("/payments", verifyFBToken, async (req, res) => {
       try {
-        const riders = await riderCollection
-          .find({
-            district,
-            // status: { $in: ["approved", "active"] },
-            // working_status: "available",
-          })
+        const paymentInfo = {
+          ...req.body,
+          userEmail: req.decoded.email,
+          createdAt: new Date().toISOString(),
+        };
+
+        const result = await paymentCollection.insertOne(paymentInfo);
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to save payment history" });
+      }
+    });
+
+    // GET /payments — নিজের payment history দেখা
+    app.get("/payments", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.query.email;
+
+        if (!email) return res.status(400).json({ message: "Email required" });
+
+        if (email !== req.decoded.email) {
+          return res.status(403).json({ message: "Forbidden access" });
+        }
+
+        const result = await paymentCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
           .toArray();
 
+        res.send(result);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to get payment history" });
+      }
+    });
+
+    /* ==================================================
+       RIDER ROUTES
+    ================================================== */
+
+    // GET /riders/available — নির্দিষ্ট district এর available rider (public)
+    app.get("/riders/available", async (req, res) => {
+      try {
+        const { district } = req.query;
+
+        const riders = await riderCollection.find({ district }).toArray();
         res.send(riders);
       } catch (error) {
-        console.error("Error fetching available riders:", error);
         res.status(500).json({ message: "Failed to get available riders" });
       }
     });
 
-    // Rider Application Routes
-    app.post("/riders", async (req, res) => {
-      const rider = req.body;
-      const result = await riderCollection.insertOne(rider);
-      res.send(result);
-    });
-    // GET: Load all pending rider applications
+    // GET /riders/pending — pending rider applications (admin only)
     app.get("/riders/pending", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const pendingRiders = await riderCollection
           .find({ status: "pending" })
           .toArray();
+
         res.send(pendingRiders);
       } catch (error) {
-        console.log("Failed to load pending riders:", error);
         res.status(500).send({ message: "Failed to load pending riders" });
       }
     });
 
-    // GET: Load all active riders
+    // GET /riders/active — সব approved/active rider (admin only)
     app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const activeRiders = await riderCollection
@@ -723,200 +851,284 @@ async function run() {
 
         res.send(activeRiders);
       } catch (error) {
-        console.log("Failed to load active riders:", error);
         res.status(500).send({ message: "Failed to load active riders" });
       }
     });
-    // PATCH: Update rider application status (approve/reject/deactivate)
-    app.patch("/riders/status/:id", async (req, res) => {
+
+    // POST /riders — rider application জমা দেওয়া
+    app.post("/riders", async (req, res) => {
       try {
-        const id = req.params.id;
-
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({ message: "Invalid rider id" });
-        }
-
-        const { status } = req.body;
-
-        const rider = await riderCollection.findOne({
-          _id: new ObjectId(id),
-        });
-
-        if (!rider) {
-          return res.status(404).send({ message: "Rider not found" });
-        }
-
-        // ✅ Update rider application
-        const result = await riderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status } },
-        );
-
-        // 🔥 ADD THIS PART (MAIN FIX)
-        if (status === "approved") {
-          await userCollection.updateOne(
-            { email: rider.userEmail },
-            { $set: { role: "rider" } },
-          );
-        }
-
+        const result = await riderCollection.insertOne(req.body);
         res.send(result);
       } catch (error) {
-        console.log("Status Update Error:", error);
-        res.status(500).send({ message: "Failed to update rider status" });
+        res.status(500).send({ message: "Failed to submit application" });
       }
     });
-    // GET: Search user by email (for admin use)
-    app.get("/users/search", async (req, res) => {
-      const emailQuery = req.query.email;
 
-      if (!emailQuery) {
-        return res.status(400).send({ message: "Email query required" });
-      }
-      // Create a case-insensitive regex for partial email matching
-      const regex = new RegExp(`^${emailQuery}`, "i");
-
-      try {
-        const users = await userCollection
-          .find({ email: { $regex: regex } })
-          .project({ email: 1, createdAt: 1, role: 1, isAdmin: 1 })
-          .limit(10)
-          .toArray();
-
-        res.send(users);
-      } catch (error) {
-        console.error("Error searching users:", error);
-        res.status(500).send({ message: "Error searching users" });
-      }
-    });
-    // PATCH: Promote user to admin (admin only)
-
+    // PATCH /riders/status/:id — rider approve/reject/deactivate (admin only)
     app.patch(
-      "/users/:id/admin",
+      "/riders/status/:id",
       verifyFBToken,
       verifyAdmin,
       async (req, res) => {
         try {
           const id = req.params.id;
-          const { isAdmin } = req.body;
 
-          const role = isAdmin ? "admin" : "user";
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid rider id" });
+          }
 
-          const result = await userCollection.updateOne(
+          const { status } = req.body;
+
+          const rider = await riderCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!rider) {
+            return res.status(404).send({ message: "Rider not found" });
+          }
+
+          const result = await riderCollection.updateOne(
             { _id: new ObjectId(id) },
-            {
-              $set: { role },
-            },
+            { $set: { status } },
           );
+
+          // approve হলে user collection এও role আপডেট
+          if (status === "approved") {
+            await userCollection.updateOne(
+              { email: rider.userEmail },
+              { $set: { role: "rider" } },
+            );
+          }
+
+          // deactivate হলে role user এ ফিরিয়ে দেওয়া
+          if (status === "deactivated") {
+            await userCollection.updateOne(
+              { email: rider.userEmail },
+              { $set: { role: "user" } },
+            );
+          }
 
           res.send(result);
         } catch (error) {
-          console.log("ADMIN UPDATE ERROR:", error);
-          res.status(500).send({ message: "Failed to update role" });
+          res.status(500).send({ message: "Failed to update rider status" });
         }
       },
     );
 
-    //GET: Get user role by email
-    app.get("/users/:email/role", async (req, res) => {
-      try {
-        const email = req.params.email;
+    /* ==================================================
+       CASH OUT ROUTES
+    ================================================== */
 
-        if (!email) {
-          return res.status(400).send({ message: "Email required" });
+    // POST /cashout — rider এর pending earning cash out request (rider only)
+    app.post("/cashout", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        // cash out হয়নি এমন delivered পার্সেল খোঁজা
+        const parcels = await parcelCollection
+          .find({
+            riderEmail: email,
+            delivery_status: "delivered",
+            isCashedOut: { $ne: true },
+          })
+          .toArray();
+
+        if (parcels.length === 0) {
+          return res.send({ success: false, message: "No available earnings" });
         }
 
-        const user = await userCollection.findOne({ email });
+        const totalAmount = parcels.reduce(
+          (sum, p) => sum + (p.earning || 0),
+          0,
+        );
 
-        // default role
-        const role = user?.role || "user";
-
-        res.send({ role });
-      } catch (error) {
-        console.log("Role API error:", error);
-        res.status(500).send({ message: "Server error" });
-      }
-    });
-
-    // PATCH: Assign rider to parcel (admin only)
-    app.patch("/parcels/assign-rider/:id", async (req, res) => {
-      const id = req.params.id;
-      const { riderId } = req.body;
-
-      const parcel = await parcelCollection.findOne({
-        _id: new ObjectId(id),
-      });
-
-      // 🔥 get rider info
-      const rider = await riderCollection.findOne({
-        _id: new ObjectId(riderId),
-      });
-
-      // ✅ assign rider + email
-      await parcelCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            riderId,
-            riderEmail: rider.userEmail,
-            delivery_status: "rider_assigned",
-            assignedAt: new Date(), // optional but useful
-          },
-        },
-      );
-
-      // tracking (same as before)
-      const existing = await trackingsCollection.findOne({
-        trackingId: parcel.trackingId,
-        status: "rider_assigned",
-      });
-
-      if (!existing) {
-        await trackingsCollection.insertOne({
-          trackingId: parcel.trackingId,
-          status: "rider_assigned",
-          message: "Rider has been assigned",
-          updatedAt: new Date(),
-          updatedBy: "admin",
+        await cashOutCollection.insertOne({
+          riderEmail: email,
+          amount: totalAmount,
+          status: "pending",
+          requestedAt: new Date(),
+          parcelIds: parcels.map((p) => p._id),
         });
-      }
 
-      res.send({ success: true });
+        // পার্সেলগুলো cashed out হিসেবে mark করা
+        await parcelCollection.updateMany(
+          { _id: { $in: parcels.map((p) => p._id) } },
+          { $set: { isCashedOut: true } },
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        res.status(500).send({ message: "CashOut failed" });
+      }
     });
 
-    // Send a ping to confirm a successful connection
+    /* ==================================================
+       DASHBOARD STATS ROUTES
+    ================================================== */
+
+    // GET /stats/user — regular user এর dashboard stats
+    app.get("/stats/user", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        const [total, paid, unpaid, delivered, inTransit] = await Promise.all([
+          parcelCollection.countDocuments({ userEmail: email }),
+          parcelCollection.countDocuments({
+            userEmail: email,
+            paymentStatus: "paid",
+          }),
+          parcelCollection.countDocuments({
+            userEmail: email,
+            paymentStatus: "unpaid",
+          }),
+          parcelCollection.countDocuments({
+            userEmail: email,
+            delivery_status: "delivered",
+          }),
+          parcelCollection.countDocuments({
+            userEmail: email,
+            delivery_status: "in_transit",
+          }),
+        ]);
+
+        const recentParcels = await parcelCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .project({
+            trackingId: 1,
+            delivery_status: 1,
+            paymentStatus: 1,
+            cost: 1,
+            createdAt: 1,
+            senderDistrict: 1,
+            receiverDistrict: 1,
+          })
+          .toArray();
+
+        res.send({ total, paid, unpaid, delivered, inTransit, recentParcels });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load user stats" });
+      }
+    });
+
+    // GET /stats/admin — admin dashboard stats
+    app.get("/stats/admin", verifyFBToken, verifyAdmin, async (req, res) => {
+      try {
+        const [
+          totalParcels,
+          pendingParcels,
+          deliveredParcels,
+          totalUsers,
+          totalRiders,
+          pendingRiders,
+          totalRevenue,
+        ] = await Promise.all([
+          parcelCollection.countDocuments({}),
+          parcelCollection.countDocuments({
+            delivery_status: "pending",
+            paymentStatus: "paid",
+          }),
+          parcelCollection.countDocuments({ delivery_status: "delivered" }),
+          userCollection.countDocuments({ role: { $ne: "admin" } }),
+          userCollection.countDocuments({ role: "rider" }),
+          riderCollection.countDocuments({ status: "pending" }),
+          paymentCollection
+            .aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }])
+            .toArray(),
+        ]);
+
+        res.send({
+          totalParcels,
+          pendingParcels,
+          deliveredParcels,
+          totalUsers,
+          totalRiders,
+          pendingRiders,
+          revenue: totalRevenue[0]?.total || 0,
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load admin stats" });
+      }
+    });
+
+    // GET /stats/rider — rider dashboard stats
+    app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        const [assigned, delivered, cashedOut] = await Promise.all([
+          parcelCollection.countDocuments({
+            riderEmail: email,
+            delivery_status: {
+              $in: ["rider_assigned", "picked", "in_transit"],
+            },
+          }),
+          parcelCollection.countDocuments({
+            riderEmail: email,
+            delivery_status: "delivered",
+          }),
+          parcelCollection.countDocuments({
+            riderEmail: email,
+            delivery_status: "delivered",
+            isCashedOut: true,
+          }),
+        ]);
+
+        const earningAgg = await parcelCollection
+          .aggregate([
+            {
+              $match: {
+                riderEmail: email,
+                delivery_status: "delivered",
+                isCashedOut: { $ne: true },
+              },
+            },
+            { $group: { _id: null, total: { $sum: "$earning" } } },
+          ])
+          .toArray();
+
+        res.send({
+          assigned,
+          delivered,
+          cashedOut,
+          pendingEarning: earningAgg[0]?.total || 0,
+        });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load rider stats" });
+      }
+    });
+
+    /* --------------------------------------------------
+       MongoDB Connection Confirmation
+    -------------------------------------------------- */
     await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!",
-    );
+    console.log("✅ Connected to MongoDB successfully!");
   } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+    // await client.close(); // production এ close করা হয় না
   }
 }
+
 run().catch(console.dir);
 
-/* =============== ============
-   ROUTES
-=========================== */
+/* ===================================================
+   BASE ROUTES
+=================================================== */
 
-// Root route
+// Root — server চলছে কিনা check
 app.get("/", (req, res) => {
   res.send("🚀 BahonXpress Parcel Server Running...");
 });
 
-// Health check route
+// Health Check — deployment monitoring এর জন্য
 app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-  });
+  res.status(200).json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
-/* ===========================
+/* ===================================================
    START SERVER
-=========================== */
-
+=================================================== */
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
