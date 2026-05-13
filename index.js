@@ -1471,6 +1471,29 @@ async function run() {
         }
       },
     );
+    // GET /rider/header-data — rider dashboard এর জন্য header data (rider only)
+    app.get(
+      "/rider/header-data",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const user = await userCollection.findOne({ email });
+
+          res.send({
+            name: user?.name,
+            email: user?.email,
+            photoURL: user?.photoURL,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to load rider header data",
+          });
+        }
+      },
+    );
 
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
