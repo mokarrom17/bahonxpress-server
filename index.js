@@ -20,7 +20,10 @@ app.use(express.json());
 /* ===================================================
    FIREBASE ADMIN INITIALIZATION
 =================================================== */
-const serviceAccount = require("./firebase-admin-key.json");
+const decodedKey = Buffer.from(process.env.FB_Service_Key, "base64").toString(
+  "utf8",
+);
+const serviceAccount = JSON.parse(decodedKey);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -44,7 +47,7 @@ const client = new MongoClient(uri, {
 =================================================== */
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     /* --------------------------------------------------
        DATABASE COLLECTIONS
@@ -138,6 +141,56 @@ async function run() {
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Failed to create user" });
+      }
+    });
+
+    // GET /users/me — নিজের profile data load করা
+    app.get("/users/me", verifyFBToken, async (req, res) => {
+      try {
+        const user = await userCollection.findOne({ email: req.decoded.email });
+        res.send(user);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load profile" });
+      }
+    });
+
+    // ✅ এখানে যোগ করো
+    // PATCH /users/profile — নিজের profile update করা
+    app.patch("/users/profile", verifyFBToken, async (req, res) => {
+      try {
+        const {
+          name,
+          phone,
+          alternatePhone,
+          gender,
+          dateOfBirth,
+          nid,
+          emergencyContact,
+          district,
+          address,
+          photoURL,
+        } = req.body;
+        const result = await userCollection.updateOne(
+          { email: req.decoded.email },
+          {
+            $set: {
+              name,
+              phone,
+              alternatePhone,
+              gender,
+              dateOfBirth,
+              nid,
+              emergencyContact,
+              district,
+              address,
+              photoURL,
+              updatedAt: new Date(),
+            },
+          },
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to update profile" });
       }
     });
 
@@ -1153,6 +1206,272 @@ async function run() {
       }
     });
 
+    // GET /stats/rider-performance — rider performance analytics (admin only)
+    app.get(
+      "/stats/rider-performance",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const result = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  delivery_status: "delivered",
+                  riderEmail: { $ne: null },
+                },
+              },
+
+              {
+                $group: {
+                  _id: "$riderEmail",
+
+                  deliveries: {
+                    $sum: 1,
+                  },
+
+                  earnings: {
+                    $sum: "$earning",
+                  },
+                },
+              },
+
+              // lookup rider info
+              {
+                $lookup: {
+                  from: "riderApplications",
+                  localField: "_id",
+                  foreignField: "userEmail",
+                  as: "riderInfo",
+                },
+              },
+
+              // safer unwind
+              {
+                $unwind: {
+                  path: "$riderInfo",
+                  preserveNullAndEmptyArrays: true,
+                },
+              },
+
+              // final output
+              {
+                $project: {
+                  _id: 0,
+
+                  rider: {
+                    $ifNull: ["$riderInfo.userName", "$_id"],
+                  },
+
+                  deliveries: 1,
+
+                  earnings: 1,
+                },
+              },
+
+              {
+                $sort: {
+                  deliveries: -1,
+                },
+              },
+
+              {
+                $limit: 7,
+              },
+            ])
+            .toArray();
+
+          res.send(result);
+        } catch (error) {
+          console.log("RIDER PERFORMANCE ERROR:", error);
+
+          res.status(500).send({
+            message: "Failed to fetch rider analytics",
+          });
+        }
+      },
+    );
+
+    // GET /stats/business-insights — ব্যবসার জন্য গুরুত্বপূর্ণ insights (admin only)
+    app.get(
+      "/stats/business-insights",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          // ================================
+          // TOP RIDER
+          // ================================
+          const topRider = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  delivery_status: "delivered",
+
+                  riderEmail: {
+                    $ne: null,
+                  },
+                },
+              },
+
+              {
+                $group: {
+                  _id: "$riderEmail",
+
+                  deliveries: {
+                    $sum: 1,
+                  },
+
+                  earnings: {
+                    $sum: "$earning",
+                  },
+                },
+              },
+
+              // 🔥 JOIN RIDERS COLLECTION
+              {
+                $lookup: {
+                  from: "riderApplications",
+
+                  localField: "_id",
+
+                  foreignField: "userEmail",
+
+                  as: "riderInfo",
+                },
+              },
+
+              // 🔥 SAFE UNWIND
+              {
+                $unwind: {
+                  path: "$riderInfo",
+
+                  preserveNullAndEmptyArrays: true,
+                },
+              },
+
+              // 🔥 FINAL SHAPE
+              {
+                $project: {
+                  _id: 0,
+
+                  rider: {
+                    $ifNull: ["$riderInfo.userName", "$_id"],
+                  },
+
+                  deliveries: 1,
+
+                  earnings: 1,
+                },
+              },
+
+              {
+                $sort: {
+                  deliveries: -1,
+                },
+              },
+
+              {
+                $limit: 1,
+              },
+            ])
+            .toArray();
+
+          // ================================
+          // MOST POPULAR ROUTE
+          // ================================
+          const topRoute = await parcelCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: {
+                    from: "$senderDistrict",
+
+                    to: "$receiverDistrict",
+                  },
+
+                  total: {
+                    $sum: 1,
+                  },
+                },
+              },
+
+              {
+                $sort: {
+                  total: -1,
+                },
+              },
+
+              {
+                $limit: 1,
+              },
+            ])
+            .toArray();
+
+          // ================================
+          // BEST REVENUE MONTH
+          // ================================
+          const bestRevenueMonth = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  paymentStatus: "paid",
+
+                  paymentDate: {
+                    $ne: null,
+                  },
+                },
+              },
+
+              {
+                $group: {
+                  _id: {
+                    $dateToString: {
+                      format: "%b %Y",
+
+                      date: {
+                        $dateFromString: {
+                          dateString: "$paymentDate",
+                        },
+                      },
+                    },
+                  },
+
+                  revenue: {
+                    $sum: "$cost.total",
+                  },
+                },
+              },
+
+              {
+                $sort: {
+                  revenue: -1,
+                },
+              },
+
+              {
+                $limit: 1,
+              },
+            ])
+            .toArray();
+
+          res.send({
+            topRider: topRider[0],
+
+            topRoute: topRoute[0],
+
+            bestRevenueMonth: bestRevenueMonth[0],
+          });
+        } catch (error) {
+          console.log("BUSINESS INSIGHTS ERROR:", error);
+
+          res.status(500).send({
+            error: error.message,
+          });
+        }
+      },
+    );
+
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
       try {
@@ -1203,8 +1522,8 @@ async function run() {
     /* --------------------------------------------------
        MongoDB Connection Confirmation
     -------------------------------------------------- */
-    await client.db("admin").command({ ping: 1 });
-    console.log("✅ Connected to MongoDB successfully!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("✅ Connected to MongoDB successfully!");
   } finally {
     // await client.close(); // production এ close করা হয় না
   }
