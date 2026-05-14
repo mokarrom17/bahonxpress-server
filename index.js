@@ -1471,25 +1471,80 @@ async function run() {
         }
       },
     );
-    // GET /rider/header-data — rider dashboard এর জন্য header data (rider only)
+    // GET /rider/dashboard-overview — rider dashboard এর জন্য সারাংশ data (rider only)
     app.get(
-      "/rider/header-data",
+      "/rider/dashboard-overview",
       verifyFBToken,
       verifyRider,
       async (req, res) => {
         try {
           const email = req.decoded.email;
 
+          // Rider User Info
           const user = await userCollection.findOne({ email });
 
+          // Rider Stats
+          const [assigned, delivered, cashedOut] = await Promise.all([
+            parcelCollection.countDocuments({
+              riderEmail: email,
+              delivery_status: {
+                $in: ["rider_assigned", "picked", "in_transit"],
+              },
+            }),
+
+            parcelCollection.countDocuments({
+              riderEmail: email,
+              delivery_status: "delivered",
+            }),
+
+            parcelCollection.countDocuments({
+              riderEmail: email,
+              delivery_status: "delivered",
+              isCashedOut: true,
+            }),
+          ]);
+
+          // Pending Earnings
+          const earningAgg = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  riderEmail: email,
+                  delivery_status: "delivered",
+                  isCashedOut: { $ne: true },
+                },
+              },
+
+              {
+                $group: {
+                  _id: null,
+                  total: {
+                    $sum: "$earning",
+                  },
+                },
+              },
+            ])
+            .toArray();
+
           res.send({
-            name: user?.name,
-            email: user?.email,
-            photoURL: user?.photoURL,
+            rider: {
+              name: user?.name,
+              email: user?.email,
+              photoURL: user?.photoURL,
+            },
+
+            stats: {
+              assigned,
+              delivered,
+              cashedOut,
+              pendingEarning: earningAgg[0]?.total || 0,
+            },
           });
         } catch (error) {
+          console.log("RIDER DASHBOARD ERROR:", error);
+
           res.status(500).send({
-            message: "Failed to load rider header data",
+            message: "Failed to load rider dashboard data",
           });
         }
       },
