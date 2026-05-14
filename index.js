@@ -1586,6 +1586,50 @@ async function run() {
         }
       },
     );
+    // GET /rider/delivery-chart — rider এর delivery status অনুযায়ী পার্সেল count (rider only)
+    app.get(
+      "/rider/delivery-chart",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const deliveryStats = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  riderEmail: email,
+                },
+              },
+
+              {
+                $group: {
+                  _id: "$delivery_status",
+                  count: {
+                    $sum: 1,
+                  },
+                },
+              },
+            ])
+            .toArray();
+
+          // formatted response
+          const formattedData = deliveryStats.map((item) => ({
+            status: item._id || "unknown",
+            value: item.count,
+          }));
+
+          res.send(formattedData);
+        } catch (error) {
+          console.log("DELIVERY CHART ERROR:", error);
+
+          res.status(500).send({
+            message: "Failed to load delivery chart data",
+          });
+        }
+      },
+    );
 
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
