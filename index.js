@@ -1550,6 +1550,43 @@ async function run() {
       },
     );
 
+    // GET /rider/recent-deliveries — rider এর recent 5 deliveries (rider only)
+    app.get(
+      "/rider/recent-deliveries",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const recentDeliveries = await parcelCollection
+            .find({
+              riderEmail: email,
+              delivery_status: "delivered",
+            })
+            .project({
+              trackingId: 1,
+              receiverName: 1,
+              receiverAddress: 1,
+              delivery_status: 1,
+              earning: 1,
+              deliveryDate: 1,
+            })
+            .sort({ deliveryDate: -1 })
+            .limit(5)
+            .toArray();
+
+          res.send(recentDeliveries);
+        } catch (error) {
+          console.log("RECENT DELIVERIES ERROR:", error);
+
+          res.status(500).send({
+            message: "Failed to load recent deliveries",
+          });
+        }
+      },
+    );
+
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
       try {
