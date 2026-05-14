@@ -1833,6 +1833,46 @@ async function run() {
       }
     });
 
+    // GET /user/latest-active-parcel — user এর latest active parcel (trackingId, receiverName, delivery status, createdAt) (authenticated user)
+    app.get("/user/latest-active-parcel", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        // Find Latest Active Parcel
+        const latestParcel = await parcelCollection.findOne(
+          {
+            userEmail: email,
+
+            delivery_status: {
+              $in: ["pending", "rider_assigned", "picked", "in_transit"],
+            },
+          },
+
+          {
+            sort: {
+              createdAt: -1,
+            },
+
+            projection: {
+              trackingId: 1,
+              receiverName: 1,
+              receiverDistrict: 1,
+              delivery_status: 1,
+              createdAt: 1,
+            },
+          },
+        );
+
+        res.send(latestParcel || {});
+      } catch (error) {
+        console.log("LATEST ACTIVE PARCEL ERROR:", error);
+
+        res.status(500).send({
+          message: "Failed to load latest parcel",
+        });
+      }
+    });
+
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
       try {
