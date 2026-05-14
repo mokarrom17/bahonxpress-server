@@ -1799,6 +1799,40 @@ async function run() {
       }
     });
 
+    // GET /user/recent-parcels — user এর recent 5 পার্সেল (trackingId, receiverName, delivery status, cost, createdAt) (authenticated user)
+
+    app.get("/user/recent-parcels", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        const recentParcels = await parcelCollection
+          .find({
+            userEmail: email,
+          })
+          .project({
+            trackingId: 1,
+            receiverName: 1,
+            receiverDistrict: 1,
+            delivery_status: 1,
+            cost: 1,
+            createdAt: 1,
+          })
+          .sort({
+            createdAt: -1,
+          })
+          .limit(5)
+          .toArray();
+
+        res.send(recentParcels);
+      } catch (error) {
+        console.log("USER RECENT PARCELS ERROR:", error);
+
+        res.status(500).send({
+          message: "Failed to load recent parcels",
+        });
+      }
+    });
+
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
       try {
