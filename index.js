@@ -1630,6 +1630,64 @@ async function run() {
         }
       },
     );
+    // GET /rider/earnings-chart — rider এর delivery date অনুযায়ী earnings (rider only)
+    app.get(
+      "/rider/earnings-chart",
+      verifyFBToken,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+
+          const earningsData = await parcelCollection
+            .aggregate([
+              {
+                $match: {
+                  riderEmail: email,
+                  delivery_status: "delivered",
+                },
+              },
+
+              {
+                $group: {
+                  _id: {
+                    $dateToString: {
+                      format: "%Y-%m-%d",
+                      date: "$deliveryDate",
+                    },
+                  },
+
+                  totalEarnings: {
+                    $sum: {
+                      $ifNull: ["$earning", 0],
+                    },
+                  },
+                },
+              },
+
+              {
+                $sort: {
+                  _id: 1,
+                },
+              },
+            ])
+            .toArray();
+
+          const formattedData = earningsData.map((item) => ({
+            date: item._id,
+            earnings: item.totalEarnings,
+          }));
+
+          res.send(formattedData);
+        } catch (error) {
+          console.log("EARNINGS CHART ERROR:", error);
+
+          res.status(500).send({
+            message: "Failed to load earnings chart data",
+          });
+        }
+      },
+    );
 
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
