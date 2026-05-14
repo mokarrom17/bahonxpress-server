@@ -1688,6 +1688,116 @@ async function run() {
         }
       },
     );
+    // -----------------------------------------------------------------
+    // user Dashboard stats
+    // -----------------------------------------------------------------
+
+    // GET /user/header-data — user dashboard এর header এ দেখানোর জন্য সারাংশ data (name, photo, profile completion) (authenticated user)
+    app.get("/user/header-data", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        // Find Current User
+        const user = await userCollection.findOne({
+          email,
+        });
+
+        // Profile Completion Fields
+        const profileFields = [
+          user?.name,
+          user?.photoURL,
+          user?.phone,
+          user?.district,
+          user?.address,
+        ];
+
+        // Count Completed Fields
+        const completedFields = profileFields.filter(Boolean).length;
+
+        // Calculate Completion Percentage
+        const profileCompletion = Math.round(
+          (completedFields / profileFields.length) * 100,
+        );
+
+        // Send Response
+        res.send({
+          name: user?.name,
+          email: user?.email,
+          photoURL: user?.photoURL,
+          profileCompletion,
+        });
+      } catch (error) {
+        console.log("USER HEADER ERROR:", error);
+
+        res.status(500).send({
+          message: "Failed to load user header data",
+        });
+      }
+    });
+
+    // GET /user/dashboard-overview — user dashboard এর জন্য সারাংশ data (total parcels, delivered, pending, total spending) (authenticated user)
+
+    app.get("/user/dashboard-overview", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        // Total Parcels
+        const totalParcels = await parcelCollection.countDocuments({
+          userEmail: email,
+        });
+
+        // Delivered Parcels
+        const deliveredParcels = await parcelCollection.countDocuments({
+          userEmail: email,
+          delivery_status: "delivered",
+        });
+
+        // Pending Parcels
+        const pendingParcels = await parcelCollection.countDocuments({
+          userEmail: email,
+
+          delivery_status: {
+            $in: ["pending", "rider_assigned", "picked", "in_transit"],
+          },
+        });
+
+        // Total Spending
+        const spendingAgg = await parcelCollection
+          .aggregate([
+            {
+              $match: {
+                userEmail: email,
+              },
+            },
+
+            {
+              $group: {
+                _id: null,
+
+                totalSpending: {
+                  $sum: {
+                    $ifNull: ["$cost.total", 0],
+                  },
+                },
+              },
+            },
+          ])
+          .toArray();
+
+        res.send({
+          totalParcels,
+          deliveredParcels,
+          pendingParcels,
+          totalSpending: spendingAgg[0]?.totalSpending || 0,
+        });
+      } catch (error) {
+        console.log("USER DASHBOARD OVERVIEW ERROR:", error);
+
+        res.status(500).send({
+          message: "Failed to load dashboard overview",
+        });
+      }
+    });
 
     // GET /stats/rider — rider dashboard stats
     app.get("/stats/rider", verifyFBToken, verifyRider, async (req, res) => {
