@@ -1115,6 +1115,19 @@ async function run() {
         res.status(500).send({ message: "CashOut failed" });
       }
     });
+    // GET /cashout — rider এর cash out history দেখা (rider only)
+    app.get("/cashout", verifyFBToken, verifyRider, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+        const history = await cashOutCollection
+          .find({ riderEmail: email })
+          .sort({ requestedAt: -1 })
+          .toArray();
+        res.send(history);
+      } catch (error) {
+        res.status(500).send({ message: "Failed to load cash out history" });
+      }
+    });
 
     /* ==================================================
        DASHBOARD STATS ROUTES
