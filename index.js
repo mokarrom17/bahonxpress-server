@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 
@@ -13,8 +15,46 @@ const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
 const app = express();
 const port = process.env.PORT || 5000;
 
+// API Rate Limiter
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+
+  max: 300, // each IP max 300 requests
+
+  standardHeaders: true,
+
+  legacyHeaders: false,
+
+  message: {
+    success: false,
+    message: "Too many requests, please try again later.",
+  },
+});
+
 // Core Middleware
-app.use(cors());
+const corsOptions = {
+  origin: [
+    "http://localhost:5173",
+    "https://bahonxpress.web.app",
+    "https://bahonxpress.firebaseapp.com",
+  ],
+
+  credentials: true,
+
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+  }),
+);
+
+app.use(cors(corsOptions));
+
+app.use(limiter);
+
 app.use(express.json());
 
 /* ===================================================
